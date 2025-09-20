@@ -188,3 +188,97 @@ Environment & tooling
 
 Notes
 - “r” = reservations: prioritized in Sprints 2 and 6.
+
+## Automated Onboarding (Multi-tenant provisioning)
+
+Objectives
+
+- One-click provisioning per restaurant (tenant).
+- Idempotent, repeatable setup from templates.
+- Tenant isolation for data, auth, and analytics.
+
+Core artifacts to provision
+
+- Tenant and locations (timezone, address).
+- Floor plan: tables, capacities, sections.
+- Menu catalog: items, categories, prices, taxes.
+- Recipes/BOM: ingredients, qty per serving, units.
+- Inventory: on-hand levels, reorder points, suppliers.
+- Employees: roles, pay rates, skills, schedules (shift templates).
+- Channels/config: dine-in, delivery, POS/payment/accounting keys.
+- Governance: consent defaults, retention policies, roles/permissions.
+
+Architecture
+
+- Multi-tenant: every table scoped by tenant_id (and location_id).
+- Template library: cuisine/menu templates, floor plan templates, staffing templates, inventory starter packs.
+- Provisioning flow: Prefect (or similar) orchestrated steps calling FastAPI endpoints; idempotent tasks with rollback.
+- Admin UI: Streamlit tab “Onboarding” to trigger/monitor provisioning.
+
+Provisioning flow (API-first)
+
+- POST /tenants → create tenant
+- POST /tenants/{tenant_id}/locations → add locations
+- POST /tenants/{tenant_id}/provision → run end-to-end provisioning from templates
+- GET /tenants/{tenant_id}/provision/{run_id}/status → logs/checks
+
+Example provisioning payload
+
+```json
+{
+	"tenant": {
+		"name": "Ocean View Group",
+		"timezone": "America/Los_Angeles",
+		"currency": "USD"
+	},
+	"locations": [
+		{
+			"name": "Ocean View – Downtown",
+			"timezone": "America/Los_Angeles",
+			"floorplan_template": "small_60_seats",
+			"tables": [
+				{"name": "T1", "capacity": 2},
+				{"name": "T2", "capacity": 4}
+			]
+		}
+	],
+	"menu_template": "italian_modern_v1",
+	"menu_overrides": [
+		{"item_name": "Truffle Fries", "price": 9.5},
+		{"item_name": "House Pinot (glass)", "price": 12.0}
+	],
+	"recipes": [
+		{"item_name": "Margherita Pizza", "ingredient": "Mozzarella", "unit": "g", "qty": 120},
+		{"item_name": "Margherita Pizza", "ingredient": "Tomato Sauce", "unit": "g", "qty": 90}
+	],
+	"inventory_init": [
+		{"ingredient": "Mozzarella", "on_hand": 20000, "reorder_point": 5000, "supplier": "DairyCo"},
+		{"ingredient": "Tomato Sauce", "on_hand": 30000, "reorder_point": 6000, "supplier": "Saucy Ltd"}
+	],
+	"employees": [
+		{"name": "Maria Rossi", "role": "Chef", "hourly_rate": 28, "skills": ["pizza", "pasta"]},
+		{"name": "Alex Chen", "role": "Server", "hourly_rate": 16, "skills": ["wine"]}
+	],
+	"shift_templates": [
+		{"role": "Server", "daypart": "dinner", "start": "17:00", "end": "22:00", "min_staff": 3}
+	],
+	"channels": {
+		"dine_in": true,
+		"delivery": ["UberEats", "DoorDash"],
+		"pos": {"provider": "MockPOS", "api_key": "REDACTED"},
+		"payments": {"provider": "Stripe", "account_id": "acct_..."}
+	},
+	"governance": {
+		"default_consents": {"marketing": false, "analytics": true},
+		"retention_days": {"orders": 730, "reviews": 365, "customers": 1095}
+	}
+}
+```
+
+Next steps in this repo
+
+- Add models and migrations for tenant/location/table/employee/role/shift_template/supplier/tax_config.
+- Create templates/ directory (YAML/JSON) for menu, floorplan, recipes, staffing, inventory.
+- Implement /tenants, /locations, /provision endpoints and a Prefect flow to orchestrate steps.
+- Add a Streamlit “Onboarding” tab to submit the provisioning payload and show step logs.
+- Add smoke tests to validate a new tenant in CI (seed, validate, teardown).

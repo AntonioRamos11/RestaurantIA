@@ -20,7 +20,7 @@ def notify(msg: str, success: bool = True):
 # Tabs
 TABS = [
     "Health", "Seed", "Reservations", "Analytics", "Recommendations",
-    "Reviews", "Inventory", "Customers", "Exports"
+    "Reviews", "Inventory", "Customers", "Exports", "Onboarding"
 ]
 selected = st.tabs(TABS)
 
@@ -332,3 +332,82 @@ with selected[8]:
         base = backend_url.rstrip('/')
         st.write(base + "/exports/daily_covers.csv?" + params)
         st.write(base + "/exports/item_sales.csv?" + params)
+
+# ---- Onboarding ----
+with selected[9]:
+    st.header("Automated Onboarding")
+    st.caption("Create tenant, add locations/tables, run provisioning")
+
+    st.subheader("Create tenant")
+    col1, col2, col3 = st.columns([2,1,1])
+    with col1:
+        t_name = st.text_input("Tenant name", value="Ocean View Group", key="onb_tenant_name")
+    with col2:
+        t_tz = st.text_input("Timezone", value="America/Los_Angeles", key="onb_tenant_tz")
+    with col3:
+        t_cur = st.text_input("Currency", value="USD", key="onb_tenant_cur")
+    if st.button("Create tenant", key="onb_create_tenant"):
+        try:
+            r = requests.post(backend_url.rstrip('/') + "/tenants", json={"name": t_name, "timezone": t_tz, "currency": t_cur}, timeout=10)
+            r.raise_for_status()
+            st.session_state["tenant"] = r.json()
+            st.success(f"Tenant created: ID {st.session_state['tenant']['id']}")
+        except Exception as ex:
+            notify(f"Create tenant failed: {ex}", success=False)
+
+    st.subheader("Add location & tables")
+    col4, col5 = st.columns([2,2])
+    with col4:
+        loc_name = st.text_input("Location name", value="Ocean View – Downtown", key="onb_loc_name")
+    with col5:
+        tables_text = st.text_area("Tables JSON (list)", value='[{"name":"T1","capacity":2},{"name":"T2","capacity":4}]', key="onb_tables")
+    if st.button("Add location", key="onb_add_location"):
+        try:
+            tenant = st.session_state.get("tenant")
+            if not tenant:
+                raise RuntimeError("Create a tenant first")
+            tables = []
+            try:
+                import json
+                tables = json.loads(tables_text)
+            except Exception:
+                pass
+            r = requests.post(backend_url.rstrip('/') + f"/tenants/{tenant['id']}/locations", json={"name": loc_name, "tables": tables}, timeout=10)
+            r.raise_for_status()
+            st.session_state["location_id"] = r.json().get("location_id")
+            st.success(f"Location created: ID {st.session_state['location_id']}")
+        except Exception as ex:
+            notify(f"Add location failed: {ex}", success=False)
+
+    st.subheader("Provision")
+    st.caption("M0 stub: marks completed immediately")
+    prov_payload = st.text_area("Provisioning payload (optional JSON)", value='{"menu_template":"italian_modern_v1"}', key="onb_payload")
+    col6, col7 = st.columns([1,1])
+    if col6.button("Run provision", key="onb_run_prov"):
+        try:
+            tenant = st.session_state.get("tenant")
+            if not tenant:
+                raise RuntimeError("Create a tenant first")
+            try:
+                import json
+                payload = json.loads(prov_payload) if prov_payload else {}
+            except Exception:
+                payload = {}
+            r = requests.post(backend_url.rstrip('/') + f"/tenants/{tenant['id']}/provision", json=payload, timeout=15)
+            r.raise_for_status()
+            st.session_state["run"] = r.json()
+            st.success(f"Provision run: {st.session_state['run']}")
+        except Exception as ex:
+            notify(f"Provision failed: {ex}", success=False)
+    if col7.button("Check status", key="onb_check_status"):
+        try:
+            tenant = st.session_state.get("tenant")
+            run = st.session_state.get("run")
+            if not tenant or not run:
+                raise RuntimeError("Run a provision first")
+            run_id = run.get("run_id")
+            r = requests.get(backend_url.rstrip('/') + f"/tenants/{tenant['id']}/provision/{run_id}/status", timeout=10)
+            r.raise_for_status()
+            st.json(r.json())
+        except Exception as ex:
+            notify(f"Status failed: {ex}", success=False)

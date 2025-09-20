@@ -48,3 +48,4 @@ Frontend Console Tabs
 - Inventory: on-hand list, adjust stock, and usage by date range
 - Customers & Governance: manage customers, consents, PII inventory, retention policies
 - Exports: build CSV export links
+- Onboarding: create tenant, add locations/tables, run provisioning and check status

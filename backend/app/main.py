@@ -119,6 +119,7 @@ class Location(Base):
     __tablename__ = "locations"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
+    tenant_id = Column(Integer, index=True, nullable=True)
     orders = relationship("Order", back_populates="location")
 
 
@@ -206,8 +207,50 @@ class RetentionPolicy(Base):
     days = Column(Integer, nullable=False)  # retain this many days
 
 
+# --- Multi-tenant Onboarding Models ---
+class Tenant(Base):
+    __tablename__ = "tenants"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True, nullable=False)
+    timezone = Column(String, nullable=True)
+    currency = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
+class ProvisionRun(Base):
+    __tablename__ = "provision_runs"
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, index=True, nullable=False)
+    status = Column(String, nullable=False, default="pending")  # pending|running|completed|failed
+    started_at = Column(DateTime, nullable=False, default=datetime.now)
+    finished_at = Column(DateTime, nullable=True)
+    message = Column(Text, nullable=True)
+
+
+class DiningTable(Base):
+    __tablename__ = "dining_tables"
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, index=True, nullable=False)
+    location_id = Column(Integer, index=True, nullable=False)
+    name = Column(String, nullable=True)
+    capacity = Column(Integer, nullable=False, default=2)
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
+    # Ensure locations.tenant_id exists in SQLite (lightweight migration)
+    with engine.connect() as conn:
+        try:
+            cols = [row[1] for row in conn.execute(func.printf("%s", "")).cursor]  # placeholder
+        except Exception:
+            cols = []
+        try:
+            res = conn.execute("PRAGMA table_info(locations)")
+            col_names = [r[1] for r in res.fetchall()]
+            if "tenant_id" not in col_names:
+                conn.execute("ALTER TABLE locations ADD COLUMN tenant_id INTEGER")
+        except Exception:
+            pass
 
 
 @app.on_event("startup")
@@ -395,6 +438,125 @@ def covers_daily(
             {"day": str(r.day), "covers": int(r.covers), "location": r.location}
             for r in rows
         ]
+    finally:
+        db.close()
+
+
+# --- Onboarding API: Tenants, Locations, Provisioning ---
+class TenantIn(BaseModel):
+    name: str
+    timezone: Optional[str] = None
+    currency: Optional[str] = None
+
+
+class TenantOut(BaseModel):
+    id: int
+    name: str
+    timezone: Optional[str]
+    currency: Optional[str]
+    created_at: datetime
+
+
+@app.post("/tenants", response_model=TenantOut)
+def create_tenant(body: TenantIn):
+    db = SessionLocal()
+    try:
+        # unique by name
+        existing = db.query(Tenant).filter(Tenant.name == body.name).first()
+        if existing:
+            return TenantOut(id=existing.id, name=existing.name, timezone=existing.timezone, currency=existing.currency, created_at=existing.created_at)
+        rec = Tenant(name=body.name, timezone=body.timezone, currency=body.currency)
+        db.add(rec)
+        db.commit()
+        db.refresh(rec)
+        return TenantOut(id=rec.id, name=rec.name, timezone=rec.timezone, currency=rec.currency, created_at=rec.created_at)
+    finally:
+        db.close()
+
+
+class LocationIn(BaseModel):
+    name: str
+    timezone: Optional[str] = None
+    tables: Optional[List[Dict]] = None  # [{"name":"T1","capacity":2}, ...]
+
+
+@app.post("/tenants/{tenant_id}/locations")
+def add_location(tenant_id: int, body: LocationIn):
+    db = SessionLocal()
+    try:
+        tenant = db.query(Tenant).get(tenant_id)
+        if not tenant:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        # location unique by (tenant_id, name) — we only have name unique globally in M0; keep simple
+        loc = db.query(Location).filter(Location.name == body.name).first()
+        if not loc:
+            loc = Location(name=body.name, tenant_id=tenant_id)
+            db.add(loc)
+            db.flush()
+        else:
+            loc.tenant_id = loc.tenant_id or tenant_id
+
+        # Create tables if provided
+        if body.tables:
+            for t in body.tables:
+                try:
+                    nm = t.get("name")
+                    cap = int(t.get("capacity", 2))
+                except Exception:
+                    nm = None
+                    cap = 2
+                db.add(DiningTable(tenant_id=tenant_id, location_id=loc.id, name=nm, capacity=cap))
+        db.commit()
+        return {"ok": True, "location_id": loc.id}
+    finally:
+        db.close()
+
+
+class ProvisionRequest(BaseModel):
+    menu_template: Optional[str] = None
+    menu_overrides: Optional[List[Dict]] = None
+    inventory_init: Optional[List[Dict]] = None
+    employees: Optional[List[Dict]] = None
+    shift_templates: Optional[List[Dict]] = None
+    channels: Optional[Dict] = None
+    governance: Optional[Dict] = None
+
+
+@app.post("/tenants/{tenant_id}/provision")
+def provision_tenant(tenant_id: int, payload: ProvisionRequest | None = None):
+    db = SessionLocal()
+    try:
+        tenant = db.query(Tenant).get(tenant_id)
+        if not tenant:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        run = ProvisionRun(tenant_id=tenant_id, status="running", started_at=datetime.now())
+        db.add(run)
+        db.flush()
+        # M0 stub: mark completed immediately; in M1+ orchestrate steps (menu, recipes, inventory, staff, policies)
+        run.status = "completed"
+        run.finished_at = datetime.now()
+        run.message = "Provisioning stub completed (M0)."
+        db.commit()
+        return {"ok": True, "run_id": run.id, "status": run.status}
+    finally:
+        db.close()
+
+
+@app.get("/tenants/{tenant_id}/provision/{run_id}/status")
+def provision_status(tenant_id: int, run_id: int):
+    db = SessionLocal()
+    try:
+        run = db.query(ProvisionRun).get(run_id)
+        if not run or run.tenant_id != tenant_id:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return {
+            "run_id": run.id,
+            "tenant_id": run.tenant_id,
+            "status": run.status,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+            "message": run.message,
+        }
     finally:
         db.close()
 
